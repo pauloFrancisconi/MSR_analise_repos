@@ -14,7 +14,7 @@ parser = argparse.ArgumentParser(description="MSR - Análise de repositório Git
 parser.add_argument(
     "--repo",
     type=str,
-    default="./repo",
+    default="src/repo",
     help="Caminho para o repositório a ser analisado (default: ./repo)"
 )
 args = parser.parse_args()
@@ -47,12 +47,17 @@ tags = [
 # ─── 3. FUNÇÕES ──────────────────────────────────────────────────────────────
 
 def checkout(tag):
-    subprocess.run(
-        ["git", "-C", REPO_PATH, "checkout", tag],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=True,
-    )
+    try:
+        subprocess.run(
+            ["git", "-C", REPO_PATH, "checkout", tag],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
+    except subprocess.CalledProcessError:
+        print(f"Não foi possível fazer checkout da tag {tag}. Pulando...")
+        return False
+    return True
 
 
 def structure_metrics(repo):
@@ -158,14 +163,17 @@ def loc():
         ["cloc", REPO_PATH, "--json"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="ignore",
     )
 
     try:
-        data = json.loads(result.stdout)
-        return data["SUM"]["code"]
+        if result.stdout:
+            data = json.loads(result.stdout)
+            return data["SUM"]["code"]
     except (json.JSONDecodeError, KeyError) as e:
         print(f"Warning (loc): {e}")
-        return 0
+    return 0
 
 
 def commits():
@@ -173,7 +181,12 @@ def commits():
         ["git", "-C", REPO_PATH, "rev-list", "--count", "HEAD"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="ignore",
     )
+
+    if not result.stdout:
+        return 0
     return int(result.stdout.strip())
 
 
@@ -182,7 +195,12 @@ def contributors():
         ["git", "-C", REPO_PATH, "shortlog", "-sn"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="ignore",
     )
+
+    if not result.stdout:
+        return 0
     return len(result.stdout.splitlines())
 
 
@@ -194,7 +212,8 @@ for tag in tags:
 
     print(f"Analyzing {tag}")
 
-    checkout(tag)
+    if not checkout(tag):
+        continue
 
     files_count, dirs_count, files = structure_metrics(REPO_PATH)
 
