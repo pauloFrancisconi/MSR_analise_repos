@@ -4,13 +4,35 @@ import re
 import json
 import csv
 import statistics
+import argparse
 import networkx as nx
 
 
-# ─── 1. VERSÕES ANALISADAS (corrigido: vírgula após "0.70.0") ────────────────
+# ─── 1. ARGUMENTO DE CAMINHO DO REPOSITÓRIO ──────────────────────────────────
+
+parser = argparse.ArgumentParser(description="MSR - Análise de repositório Git")
+parser.add_argument(
+    "--repo",
+    type=str,
+    default="./repo",
+    help="Caminho para o repositório a ser analisado (default: ./repo)"
+)
+args = parser.parse_args()
+
+REPO_PATH = args.repo
+
+if not os.path.isdir(REPO_PATH):
+    print(f"❌ Repositório não encontrado em: {REPO_PATH}")
+    print("Use: uv run src/main.py --repo ./repo")
+    exit(1)
+
+print(f"📁 Analisando repositório em: {REPO_PATH}")
+
+
+# ─── 2. VERSÕES ANALISADAS ───────────────────────────────────────────────────
 
 tags = [
-    "0.70.0",   # fix: vírgula adicionada
+    "0.70.0",
     "1.0.0",
     "2.0.0",
     "3.0.0",
@@ -22,11 +44,11 @@ tags = [
 ]
 
 
-# ─── 2. FUNÇÕES DEFINIDAS ANTES DO LOOP (corrigido: ordem de definição) ──────
+# ─── 3. FUNÇÕES ──────────────────────────────────────────────────────────────
 
 def checkout(tag):
     subprocess.run(
-        ["git", "checkout", tag],
+        ["git", "-C", REPO_PATH, "checkout", tag],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=True,
@@ -68,10 +90,8 @@ def file_size_metrics(files):
         try:
             sizes.append(os.path.getsize(f))
         except OSError as e:
-            # fix: except genérico substituído por OSError com aviso
             print(f"Warning (file_size_metrics): {e}")
 
-    # fix: proteção contra lista vazia (evita ZeroDivisionError)
     if not sizes:
         return 0, 0
 
@@ -92,7 +112,6 @@ def dependency_metrics(files):
         try:
             content = open(f, errors="ignore").read()
         except OSError as e:
-            # fix: except genérico substituído por OSError com aviso
             print(f"Warning (dependency_metrics): {e}")
             continue
 
@@ -136,7 +155,7 @@ def dependency_graph(files):
 
 def loc():
     result = subprocess.run(
-        ["cloc", ".", "--json"],
+        ["cloc", REPO_PATH, "--json"],
         capture_output=True,
         text=True,
     )
@@ -151,7 +170,7 @@ def loc():
 
 def commits():
     result = subprocess.run(
-        ["git", "rev-list", "--count", "HEAD"],
+        ["git", "-C", REPO_PATH, "rev-list", "--count", "HEAD"],
         capture_output=True,
         text=True,
     )
@@ -160,14 +179,14 @@ def commits():
 
 def contributors():
     result = subprocess.run(
-        ["git", "shortlog", "-sn"],
+        ["git", "-C", REPO_PATH, "shortlog", "-sn"],
         capture_output=True,
         text=True,
     )
     return len(result.stdout.splitlines())
 
 
-# ─── 3. LOOP PRINCIPAL ───────────────────────────────────────────────────────
+# ─── 4. LOOP PRINCIPAL ───────────────────────────────────────────────────────
 
 rows = []
 
@@ -177,7 +196,7 @@ for tag in tags:
 
     checkout(tag)
 
-    files_count, dirs_count, files = structure_metrics(".")
+    files_count, dirs_count, files = structure_metrics(REPO_PATH)
 
     avg_depth, max_depth = depth_metrics(files)
 
@@ -211,7 +230,7 @@ for tag in tags:
     ])
 
 
-# ─── 4. EXPORTAÇÃO CSV ───────────────────────────────────────────────────────
+# ─── 5. EXPORTAÇÃO CSV ───────────────────────────────────────────────────────
 
 with open("metrics.csv", "w", newline="") as f:
 
@@ -236,4 +255,4 @@ with open("metrics.csv", "w", newline="") as f:
 
     writer.writerows(rows)
 
-print(" metrics.csv gerado com sucesso!")
+print("✅ metrics.csv gerado com sucesso!")
