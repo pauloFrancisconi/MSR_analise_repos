@@ -37,9 +37,7 @@ tags = [
     "3.0.0",
     "4.0.0",
     "5.0.0",
-    "6.0.1",   
-    "7.0.0",
-    "8.0.0",
+    "6.0.0",   
 ]
 
 # ─── 3. FUNÇÕES ──────────────────────────────────────────────────────────────
@@ -99,17 +97,88 @@ def file_size_metrics(files):
     return sum(sizes) / len(sizes), max(sizes)
 
 
-# ─── DEPENDENCY METRICS PARA JS/TS ──────────────────────────────────────────
+# ─── LANGUAGE CONFIGS ────────────────────────────────────────────────────────
+LANGUAGE_CONFIGS = {
+    "js_ts": {
+        "extensions": (".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs"),
+        "import_patterns": [
+            r"""(?:import\s+(?:[^'"]+\s+from\s+)?['"]([^'"]+)['"])""",
+            r"""(?:require\(\s*['"]([^'"]+)['"]\s*\))""",
+            r"""(?:import\(\s*['"]([^'"]+)['"]\s*\))""",
+        ],
+        # Imports relativos começam com . ou ..
+        "is_internal": lambda i: bool(re.match(r"^\.", i)),
+    },
+    "python": {
+        "extensions": (".py",),
+        "import_patterns": [
+            r"""^from\s+(\.+[\w.]*)\s+import""",   # from .module import ...
+            r"""^import\s+(\.+[\w.]*)""",            # import .module (raro, mas válido)
+        ],
+        "is_internal": lambda i: i.startswith("."),
+    },
+    "php": {
+        "extensions": (".php",),
+        "import_patterns": [
+            r"""(?:require|include|require_once|include_once)\s*\(?['"]([^'"]+)['"]\)?""",
+        ],
+        "is_internal": lambda i: not i.startswith("http") and "/" in i,
+    },
+    "java": {
+        "extensions": (".java",),
+        "import_patterns": [
+            r"""^import\s+([\w.]+);""",
+        ],
+        # Heurística: imports do próprio projeto (ajuste o prefixo conforme necessário)
+        "is_internal": lambda i: not any(
+            i.startswith(pkg)
+            for pkg in ("java.", "javax.", "org.springframework.", "com.google.", "org.apache.")
+        ),
+    },
+    "ruby": {
+        "extensions": (".rb",),
+        "import_patterns": [
+            r"""(?:require_relative\s+['"]([^'"]+)['"])""",
+            r"""(?:require\s+['"](\./[^'"]+)['"])""",  # require com caminho relativo
+        ],
+        "is_internal": lambda i: i.startswith(".") or not i.startswith("/"),
+    },
+}
+
+
+def _detect_language(filepath: str):
+    """Retorna a config da linguagem com base na extensão do arquivo."""
+    for lang, cfg in LANGUAGE_CONFIGS.items():
+        if filepath.endswith(cfg["extensions"]):
+            return lang, cfg
+    return None, None
+
+
+def _extract_imports(content: str, patterns: list[str], is_internal) -> list[str]:
+    """Extrai imports internos de um arquivo dado os padrões da linguagem."""
+    found = []
+    for pattern in patterns:
+        matches = re.findall(pattern, content, re.MULTILINE)
+        # re.findall retorna strings ou tuplas dependendo dos grupos
+        for m in matches:
+            token = m if isinstance(m, str) else next((x for x in m if x), "")
+            if token and is_internal(token):
+                found.append(token)
+    return found
+
+
+# ─── DEPENDENCY METRICS (multi-linguagem) ────────────────────────────────────
 def dependency_metrics(files):
     """
-    FIX: Só analisa arquivos .js/.ts que já foram filtrados (sem node_modules),
-    garantindo que fanout_avg reflita o código-fonte real.
+    Analisa imports internos de JS/TS, Python, PHP, Java e Ruby.
+    Retorna (fanout_avg, fanout_max, total_imports).
     """
     fanouts = []
     total_imports = 0
 
     for f in files:
-        if not f.endswith((".js", ".ts")):
+        _, cfg = _detect_language(f)
+        if cfg is None:
             continue
 
         try:
@@ -118,21 +187,9 @@ def dependency_metrics(files):
             print(f"Warning (dependency_metrics): {e}")
             continue
 
-        imports = re.findall(
-            r"""(?:import\s+(?:[^'"]+\s+from\s+)?['"]([^'"]+)['"])|
-                (?:require\(\s*['"]([^'"]+)['"]\s*\))|
-                (?:import\(\s*['"]([^'"]+)['"]\s*\))""",
-            content,
-            re.MULTILINE | re.VERBOSE,
-        )
-
-        # Considera apenas imports relativos (internos ao projeto)
-        flat_imports = [
-            i for t in imports for i in t if i and not re.match(r"^[a-z@]", i)
-        ]
-
-        fanouts.append(len(flat_imports))
-        total_imports += len(flat_imports)
+        imports = _extract_imports(content, cfg["import_patterns"], cfg["is_internal"])
+        fanouts.append(len(imports))
+        total_imports += len(imports)
 
     if not fanouts:
         return 0, 0, 0
@@ -140,18 +197,17 @@ def dependency_metrics(files):
     return sum(fanouts) / len(fanouts), max(fanouts), total_imports
 
 
-# ─── DEPENDENCY GRAPH PARA JS/TS ────────────────────────────────────────────
+# ─── DEPENDENCY GRAPH (multi-linguagem) ──────────────────────────────────────
 def dependency_graph(files):
     """
-    FIX: Com node_modules fora do walk, o grafo agora tem apenas nós do
-    projeto real — density deixa de ser ~0 e passa a ser interpretável.
-    Normaliza os nós para caminhos relativos ao repo para evitar
-    nós duplicados por diferença de prefixo absoluto.
+    Constrói grafo dirigido de dependências internas para todas as linguagens
+    suportadas. Nós normalizados como caminhos relativos ao REPO_PATH.
     """
     G = nx.DiGraph()
 
     for f in files:
-        if not f.endswith((".js", ".ts")):
+        _, cfg = _detect_language(f)
+        if cfg is None:
             continue
 
         try:
@@ -160,22 +216,10 @@ def dependency_graph(files):
             print(f"Warning (dependency_graph): {e}")
             continue
 
-        imports = re.findall(
-            r"""(?:import\s+(?:[^'"]+\s+from\s+)?['"]([^'"]+)['"])|
-                (?:require\(\s*['"]([^'"]+)['"]\s*\))|
-                (?:import\(\s*['"]([^'"]+)['"]\s*\))""",
-            content,
-            re.MULTILINE | re.VERBOSE,
-        )
-
-        flat_imports = [
-            i for t in imports for i in t if i and not re.match(r"^[a-z@]", i)
-        ]
-
-        # Nó fonte normalizado (relativo ao repo)
+        imports = _extract_imports(content, cfg["import_patterns"], cfg["is_internal"])
         src_node = os.path.relpath(f, REPO_PATH)
 
-        for dep in flat_imports:
+        for dep in imports:
             dep_abs  = os.path.normpath(os.path.join(os.path.dirname(f), dep))
             dep_node = os.path.relpath(dep_abs, REPO_PATH)
             G.add_edge(src_node, dep_node)
